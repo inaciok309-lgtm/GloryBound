@@ -1,253 +1,292 @@
--- GloryBound: Auto Train, Rebirth & Undetectable Kill
--- Loaded from GitHub via: loadstring(game:HttpGet("https://raw.githubusercontent.com/Biskus0/GloryBound/refs/heads/main/Loading.lua"))()
--- Designed for Delta Executor (Mobile)
+--[[
+    GloryBound — Modern UI Rebuild
+    Self-contained. No external loadstring.
+    Target: Delta Executor (Mobile)
+]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local player = Players.LocalPlayer
+local TweenService = game:GetService("TweenService")
+local CoreGui = game:GetService("CoreGui")
 
--- Aguarda os Remotes do jogo (com timeout seguro)
-local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
-if not Remotes then
-    warn("GloryBound Script: Remotes não encontrados. O jogo pode ter atualizado.")
-    return
-end
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
 
--- Estado do script
+-- ============ STATE ============
 local state = {
     autoTrain = false,
     autoRebirth = false,
-    autoKill = false,
     killAura = false,
+    silentAim = false,
     undetectable = true,
-    connection = nil,
-    killConnection = nil
 }
 
--- Função para obter a HumanoidRootPart de um inimigo
-local function getEnemyRoot(enemy)
-    if not enemy or not enemy:IsA("Model") then return nil end
-    local root = enemy:FindFirstChild("HumanoidRootPart")
-    if not root then root = enemy:FindFirstChild("Torso") end
-    if not root then root = enemy:FindFirstChild("UpperTorso") end
-    return root
+-- ============ REMOTES ============
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+local TrainRemote = Remotes and Remotes:FindFirstChild("Train")
+local RebirthRemote = Remotes and Remotes:FindFirstChild("Rebirth")
+
+-- ============ HELPERS ============
+local function getEnemies()
+    local enemies = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hrp and hum and hum.Health > 0 then
+                table.insert(enemies, {player = plr, hrp = hrp, hum = hum})
+            end
+        end
+    end
+    return enemies
 end
 
--- Função para verificar se um inimigo está vivo e é válido
-local function isEnemyValid(enemy)
-    if not enemy or not enemy.Parent then return false end
-    local humanoid = enemy:FindFirstChild("Humanoid")
-    if humanoid and humanoid.Health <= 0 then return false end
-    return true
+local function closestEnemy()
+    local best, bestDist = nil, math.huge
+    local myChar = LocalPlayer.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return nil end
+    for _, e in ipairs(getEnemies()) do
+        local d = (e.hrp.Position - myHRP.Position).Magnitude
+        if d < bestDist then
+            bestDist, best = d, e
+        end
+    end
+    return best
 end
 
--- Função para obter a parte da cabeça do inimigo (para silent aim)
-local function getHead(enemy)
-    if not enemy or not enemy:IsA("Model") then return nil end
-    local head = enemy:FindFirstChild("Head")
-    if not head then head = enemy:FindFirstChild("UpperTorso") end
-    return head
+local function humanDelay()
+    if state.undetectable then
+        task.wait(math.random(50, 150) / 1000)
+    end
 end
 
--- Função de Auto Train (Mantida da versão anterior)
-local function startAutoTrain()
-    if state.connection then state.connection:Disconnect() end
-    state.connection = task.spawn(function()
-        while state.autoTrain do
-            local delay = state.undetectable and math.random(50, 150)/100 or 0.5
-            task.wait(delay)
-            
-            local trainRemote = Remotes:FindFirstChild("Train")
-            if trainRemote then
-                trainRemote:FireServer()
+-- ============ LOOPS ============
+task.spawn(function()
+    while true do
+        if state.autoTrain then
+            if TrainRemote then
+                pcall(function() TrainRemote:FireServer() end)
             else
-                local VirtualUser = game:GetService("VirtualUser")
-                VirtualUser:CaptureController()
-                VirtualUser:ClickButton1(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+                -- fallback: simulate click
+                pcall(function()
+                    local vu = game:GetService("VirtualUser")
+                    vu:CaptureController()
+                    vu:ClickButton1(Vector2.new(Mouse.X, Mouse.Y))
+                end)
             end
+            humanDelay()
+            task.wait(0.1)
+        else
+            task.wait(0.25)
         end
-    end)
-end
+    end
+end)
 
--- Função de Auto Rebirth (Mantida da versão anterior)
-local function startAutoRebirth()
-    task.spawn(function()
-        while state.autoRebirth do
-            local delay = state.undetectable and math.random(150, 300)/100 or 2
-            task.wait(delay)
-            
-            local rebirthRemote = Remotes:FindFirstChild("Rebirth")
-            if rebirthRemote then
-                rebirthRemote:FireServer()
+task.spawn(function()
+    while true do
+        if state.autoRebirth and RebirthRemote then
+            pcall(function() RebirthRemote:FireServer() end)
+            humanDelay()
+            task.wait(0.5)
+        else
+            task.wait(0.5)
+        end
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if state.killAura or state.silentAim then
+        local target = closestEnemy()
+        if target then
+            if state.silentAim then
+                -- snap mouse aim
+                local cam = workspace.CurrentCamera
+                if cam then
+                    local look = CFrame.new(cam.CFrame.Position, target.hrp.Position)
+                    cam.CFrame = cam.CFrame:Lerp(look, 0.35)
+                end
             end
-        end
-    end)
-end
-
--- Função de Silent Aim (Auto Kill à distância)
-local function startSilentAim()
-    if state.killConnection then state.killConnection:Disconnect() end
-    state.killConnection = RunService.RenderStepped:Connect(function()
-        if not state.autoKill then return end
-        
-        local character = player.Character
-        if not character then return end
-        
-        local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
-        local humanoid = character:FindFirstChild("Humanoid")
-        if not humanoidRootPart or not humanoid or humanoid.Health <= 0 then return end
-        
-        local closestEnemy = nil
-        local shortestDistance = math.huge
-        
-        for _, enemy in pairs(workspace:GetChildren()) do
-            if isEnemyValid(enemy) and enemy ~= character then
-                local enemyRoot = getEnemyRoot(enemy)
-                if enemyRoot then
-                    local distance = (enemyRoot.Position - humanoidRootPart.Position).Magnitude
-                    if distance < shortestDistance and distance < 500 then
-                        shortestDistance = distance
-                        closestEnemy = enemy
-                    end
+            if state.killAura then
+                if target.hum then
+                    target.hum.Health = 0
+                end
+                if target.hrp then
+                    target.hrp.CFrame = target.hrp.CFrame * CFrame.Angles(0, math.rad(90), 0)
                 end
             end
         end
-        
-        if closestEnemy then
-            local head = getHead(closestEnemy)
-            if head then
-                -- "Silent" aim: move the camera/character to aim at the enemy
-                -- This is a simplified version; a full silent aim would hook the mouse
-                local aimPosition = head.Position
-                local currentCFrame = workspace.CurrentCamera.CFrame
-                local newCFrame = CFrame.new(currentCFrame.Position, aimPosition)
-                workspace.CurrentCamera.CFrame = newCFrame
-                
-                -- Simulate a click/attack every render step (adjust as needed)
-                -- In many executors, you can use VirtualUser
-                local VirtualUser = game:GetService("VirtualUser")
-                VirtualUser:CaptureController()
-                VirtualUser:ClickButton1(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
-            end
-        end
+    end
+end)
+
+-- ============ UI ============
+local old = CoreGui:FindFirstChild("GloryBoundUI")
+if old then old:Destroy() end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "GloryBoundUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = CoreGui
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.new(0, 320, 0, 420)
+Main.Position = UDim2.new(0.5, -160, 0.5, -210)
+Main.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Draggable = true
+Main.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 14)
+UICorner.Parent = Main
+
+local UIStroke = Instance.new("UIStroke")
+UIStroke.Color = Color3.fromRGB(45, 45, 55)
+UIStroke.Thickness = 1
+UIStroke.Parent = Main
+
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 52)
+Header.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+Header.BorderSizePixel = 0
+Header.Parent = Main
+local HCorner = Instance.new("UICorner")
+HCorner.CornerRadius = UDim.new(0, 14)
+HCorner.Parent = Header
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 20, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "GloryBound"
+Title.TextColor3 = Color3.fromRGB(240, 240, 245)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 18
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Header
+
+local Accent = Instance.new("Frame")
+Accent.Size = UDim2.new(0, 6, 0, 24)
+Accent.Position = UDim2.new(0, 10, 0.5, -12)
+Accent.BackgroundColor3 = Color3.fromRGB(120, 90, 255)
+Accent.BorderSizePixel = 0
+Accent.Parent = Header
+local ACorner = Instance.new("UICorner")
+ACorner.CornerRadius = UDim.new(1, 0)
+ACorner.Parent = Accent
+
+local Status = Instance.new("TextLabel")
+Status.Size = UDim2.new(0, 60, 0, 18)
+Status.Position = UDim2.new(1, -70, 0, 8)
+Status.BackgroundTransparency = 1
+Status.Text = "ready"
+Status.TextColor3 = Color3.fromRGB(80, 220, 140)
+Status.Font = Enum.Font.Gotham
+Status.TextSize = 11
+Status.TextXAlignment = Enum.TextXAlignment.Right
+Status.Parent = Header
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 28, 0, 28)
+CloseBtn.Position = UDim2.new(1, -36, 0, 12)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+CloseBtn.Text = "×"
+CloseBtn.TextColor3 = Color3.fromRGB(220, 220, 230)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 16
+CloseBtn.AutoButtonColor = false
+CloseBtn.Parent = Header
+local CCorner = Instance.new("UICorner")
+CCorner.CornerRadius = UDim.new(0, 8)
+CCorner.Parent = CloseBtn
+CloseBtn.MouseButton1Click:Connect(function()
+    ScreenGui:Destroy()
+end)
+
+-- ============ FEATURE ROWS ============
+local List = Instance.new("Frame")
+List.Size = UDim2.new(1, -24, 1, -72)
+List.Position = UDim2.new(0, 12, 0, 60)
+List.BackgroundTransparency = 1
+List.Parent = Main
+
+local function makeRow(yOffset, label, key)
+    local Row = Instance.new("Frame")
+    Row.Size = UDim2.new(1, 0, 0, 46)
+    Row.Position = UDim2.new(0, 0, 0, yOffset)
+    Row.BackgroundColor3 = Color3.fromRGB(26, 26, 34)
+    Row.BorderSizePixel = 0
+    Row.Parent = List
+    local rCorner = Instance.new("UICorner")
+    rCorner.CornerRadius = UDim.new(0, 10)
+    rCorner.Parent = Row
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -80, 1, 0)
+    Label.Position = UDim2.new(0, 16, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = label
+    Label.TextColor3 = Color3.fromRGB(220, 220, 230)
+    Label.Font = Enum.Font.GothamMedium
+    Label.TextSize = 14
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Row
+
+    local ToggleBtn = Instance.new("TextButton")
+    ToggleBtn.Size = UDim2.new(0, 44, 0, 24)
+    ToggleBtn.Position = UDim2.new(1, -60, 0.5, -12)
+    ToggleBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
+    ToggleBtn.Text = ""
+    ToggleBtn.AutoButtonColor = false
+    ToggleBtn.Parent = Row
+    local tCorner = Instance.new("UICorner")
+    tCorner.CornerRadius = UDim.new(1, 0)
+    tCorner.Parent = ToggleBtn
+
+    local Knob = Instance.new("Frame")
+    Knob.Size = UDim2.new(0, 18, 0, 18)
+    Knob.Position = UDim2.new(0, 3, 0.5, -9)
+    Knob.BackgroundColor3 = Color3.fromRGB(200, 200, 210)
+    Knob.BorderSizePixel = 0
+    Knob.Parent = ToggleBtn
+    local kCorner = Instance.new("UICorner")
+    kCorner.CornerRadius = UDim.new(1, 0)
+    kCorner.Parent = Knob
+
+    local onColor = Color3.fromRGB(120, 90, 255)
+    local offColor = Color3.fromRGB(45, 45, 58)
+
+    local function setState(on)
+        state[key] = on
+        TweenService:Create(ToggleBtn, TweenInfo.new(0.18), {
+            BackgroundColor3 = on and onColor or offColor
+        }):Play()
+        TweenService:Create(Knob, TweenInfo.new(0.18), {
+            Position = on and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9)
+        }):Play()
+    end
+
+    ToggleBtn.MouseButton1Click:Connect(function()
+        setState(not state[key])
+        Status.Text = state[key] and (label .. " on") or "ready"
     end)
-end
 
--- Função de Kill Aura (Dano em área)
-local function startKillAura()
-    task.spawn(function()
-        while state.killAura do
-            local delay = state.undetectable and math.random(30, 100)/100 or 0.2
-            task.wait(delay)
-            
-            local character = player.Character
-            if not character then continue end
-            local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
-            if not humanoidRootPart then continue end
-            
-            for _, enemy in pairs(workspace:GetChildren()) do
-                if isEnemyValid(enemy) and enemy ~= character then
-                    local enemyRoot = getEnemyRoot(enemy)
-                    if enemyRoot then
-                        local distance = (enemyRoot.Position - humanoidRootPart.Position).Magnitude
-                        if distance < 25 then -- Raio de 25 studs
-                            -- Tenta disparar um remote de dano (ajuste o nome se necessário)
-                            local damageRemote = Remotes:FindFirstChild("Damage") or Remotes:FindFirstChild("Attack")
-                            if damageRemote then
-                                damageRemote:FireServer(enemy)
-                            else
-                                -- Fallback: teleporta levemente para perto e ataca
-                                -- (Isso é mais detectável, use com moderação)
-                                enemyRoot.CFrame = humanoidRootPart.CFrame * CFrame.new(0, 0, -3)
-                            end
-                        end
-                    end
-                end
-            end
-        end
+    -- touch support
+    ToggleBtn.TouchTap:Connect(function()
+        setState(not state[key])
+        Status.Text = state[key] and (label .. " on") or "ready"
     end)
+
+    return Row
 end
 
--- Remove GUI antiga, se existir
-local guiParent = (gethui and gethui()) or game:GetService("CoreGui")
-if guiParent:FindFirstChild("GloryBound_Auto") then
-    guiParent.GloryBound_Auto:Destroy()
-end
-
--- Cria a interface
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "GloryBound_Auto"
-screenGui.ResetOnSpawn = false
-screenGui.Parent = guiParent
-
-local mainFrame = Instance.new("Frame")
-mainFrame.Size = UDim2.new(0, 240, 0, 240)
-mainFrame.Position = UDim2.new(0.5, -120, 0.25, 0)
-mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-mainFrame.BorderSizePixel = 0
-mainFrame.Active = true
-mainFrame.Draggable = true
-mainFrame.Parent = screenGui
-
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 30)
-title.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-title.BorderSizePixel = 0
-title.Text = "GloryBound Auto"
-title.TextColor3 = Color3.new(1, 1, 1)
-title.Font = Enum.Font.SourceSansBold
-title.TextSize = 18
-title.Parent = mainFrame
-
-local function createButton(text, yPos, callback)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0.9, 0, 0, 30)
-    btn.Position = UDim2.new(0.05, 0, 0, yPos)
-    btn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-    btn.BorderSizePixel = 0
-    btn.Text = text
-    btn.TextColor3 = Color3.new(1, 1, 1)
-    btn.Font = Enum.Font.SourceSans
-    btn.TextSize = 15
-    btn.Parent = mainFrame
-    btn.MouseButton1Click:Connect(callback)
-    return btn
-end
-
-local trainButton = createButton("Auto Train: OFF", 40, function()
-    state.autoTrain = not state.autoTrain
-    trainButton.Text = "Auto Train: " .. (state.autoTrain and "ON" or "OFF")
-    trainButton.BackgroundColor3 = state.autoTrain and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(60, 60, 60)
-    if state.autoTrain then startAutoTrain() end
-end)
-
-local rebirthButton = createButton("Auto Rebirth: OFF", 80, function()
-    state.autoRebirth = not state.autoRebirth
-    rebirthButton.Text = "Auto Rebirth: " .. (state.autoRebirth and "ON" or "OFF")
-    rebirthButton.BackgroundColor3 = state.autoRebirth and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(60, 60, 60)
-    if state.autoRebirth then startAutoRebirth() end
-end)
-
-local killButton = createButton("Auto Kill (Silent): OFF", 120, function()
-    state.autoKill = not state.autoKill
-    killButton.Text = "Auto Kill (Silent): " .. (state.autoKill and "ON" or "OFF")
-    killButton.BackgroundColor3 = state.autoKill and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(60, 60, 60)
-    if state.autoKill then startSilentAim() end
-end)
-
-local auraButton = createButton("Kill Aura: OFF", 160, function()
-    state.killAura = not state.killAura
-    auraButton.Text = "Kill Aura: " .. (state.killAura and "ON" or "OFF")
-    auraButton.BackgroundColor3 = state.killAura and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(60, 60, 60)
-    if state.killAura then startKillAura() end
-end)
-
-local undetectableButton = createButton("Undetectable: ON", 200, function()
-    state.undetectable = not state.undetectable
-    undetectableButton.Text = "Undetectable: " .. (state.undetectable and "ON" or "OFF")
-    undetectableButton.BackgroundColor3 = state.undetectable and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(60, 60, 60)
-end)
--- Inicializa o botão "Undetectable" como ON
-undetectableButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+makeRow(0,   "Auto Train",   "autoTrain")
+makeRow(54,  "Auto Rebirth", "autoRebirth")
+makeRow(108, "Kill Aura",    "killAura")
+makeRow(162, "Silent Aim",   "silentAim")
+makeRow(216, "Undetectable", "undetectable")
