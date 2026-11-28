@@ -1,6 +1,6 @@
 --[[
-    GloryBound — v4 (audited)
-    Delta Executor / mobile
+    GloryBound — v5
+    Responsive UI + working remote discovery
 ]]
 
 local Players           = game:GetService("Players")
@@ -15,7 +15,7 @@ repeat task.wait() until Players.LocalPlayer
 local LocalPlayer = Players.LocalPlayer
 
 local CONFIG_FILE = "GloryBound_config.json"
-local VERSION     = "v4.0"
+local VERSION     = "v5.0"
 
 local state = {
     autoTrain    = false,
@@ -25,38 +25,101 @@ local state = {
     undetectable = true,
 }
 
--- ================= REMOTES =================
-local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
-if not Remotes then
-    task.spawn(function() Remotes = ReplicatedStorage:WaitForChild("Remotes", 20) end)
-end
+-- ============================================================
+-- REMOTE DISCOVERY
+-- ============================================================
+local allRemotes = {}
+local working = {train = nil, rebirth = nil, attack = {}}
 
-local function fireRemote(name, ...)
-    if not Remotes then return false end
-    local remote = Remotes:FindFirstChild(name)
-    if not remote then return false end
-    local args = table.pack(...)
-    return (pcall(function()
-        remote:FireServer(table.unpack(args, 1, args.n))
-    end))
-end
-
--- cached attack remotes (bug #2 fix)
-local attackRemotes = {}
-local function refreshAttackRemotes()
-    attackRemotes = {}
-    if not Remotes then return end
-    for _, v in ipairs(Remotes:GetChildren()) do
-        local n = v.Name:lower()
-        if n:find("attack") or n:find("hit")
-        or n:find("damage") or n:find("strike") then
-            table.insert(attackRemotes, v)
+local function scanRemotes()
+    allRemotes = {}
+    local folder = ReplicatedStorage:FindFirstChild("Remotes")
+    local containers = folder and {folder} or {ReplicatedStorage}
+    for _, container in ipairs(containers) do
+        for _, obj in ipairs(container:GetDescendants()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                allRemotes[#allRemotes+1] = {
+                    name = obj.Name,
+                    remote = obj,
+                    class = obj.ClassName,
+                }
+            end
         end
     end
+    print(("[GB] === Remotes discovered: %d ==="):format(#allRemotes))
+    for i, r in ipairs(allRemotes) do
+        if i > 150 then print("[GB] ... (truncated)"); break end
+        print(("  [%s] %s"):format(r.class, r.name))
+    end
 end
-refreshAttackRemotes()
+task.spawn(scanRemotes)
 
--- ================= HELPERS =================
+local CANDIDATES = {
+    train   = {"Train","train","AutoTrain","StartTrain","Training","DoTrain",
+               "TrainUp","AddTrain","Farm","farm","Grind"},
+    rebirth = {"Rebirth","rebirth","AutoRebirth","DoRebirth","Reborn",
+               "Prestige","Reincarnate","Reset"},
+    attack  = {"Attack","attack","Hit","hit","Damage","damage","Strike",
+               "strike","Punch","Kill","kill","Skill","Shoot","Fire","Combat"},
+}
+
+local function findRemote(kind)
+    -- 1. exact match on candidate names
+    for _, cand in ipairs(CANDIDATES[kind]) do
+        for _, r in ipairs(allRemotes) do
+            if r.name == cand then return r end
+        end
+    end
+    -- 2. substring match
+    for _, cand in ipairs(CANDIDATES[kind]) do
+        local cl = cand:lower()
+        for _, r in ipairs(allRemotes) do
+            if r.name:lower():find(cl, 1, true) then return r end
+        end
+    end
+    return nil
+end
+
+local function fireEntry(entry, ...)
+    if not entry then return false end
+    local args = table.pack(...)
+    if entry.class == "RemoteEvent" then
+        return (pcall(function()
+            entry.remote:FireServer(table.unpack(args, 1, args.n))
+        end))
+    else
+        task.spawn(function()
+            pcall(function()
+                entry.remote:InvokeServer(table.unpack(args, 1, args.n))
+            end)
+        end)
+        return true
+    end
+end
+
+local function refreshAttackList()
+    working.attack = {}
+    for _, r in ipairs(allRemotes) do
+        if r.class == "RemoteEvent" then
+            local lower = r.name:lower()
+            for _, cand in ipairs(CANDIDATES.attack) do
+                if lower:find(cand:lower(), 1, true) then
+                    working.attack[#working.attack+1] = r
+                    break
+                end
+            end
+        end
+    end
+    if #working.attack > 0 then
+        print(("[GB] attack remotes: %d"):format(#working.attack))
+        for _, r in ipairs(working.attack) do print("  -> " .. r.name) end
+    end
+end
+task.spawn(refreshAttackList)
+
+-- ============================================================
+-- HELPERS
+-- ============================================================
 local function getEnemies()
     local list = {}
     for _, plr in ipairs(Players:GetPlayers()) do
@@ -75,10 +138,10 @@ local function closestEnemy()
     local myChar = LocalPlayer.Character
     local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
     if not myHRP then return nil end
-    local best, bestDist = nil, math.huge
+    local best, bestD = nil, math.huge
     for _, e in ipairs(getEnemies()) do
         local d = (e.hrp.Position - myHRP.Position).Magnitude
-        if d < bestDist then bestDist, best = d, e end
+        if d < bestD then bestD, best = d, e end
     end
     return best
 end
@@ -89,21 +152,32 @@ local function jitterWait()
     end
 end
 
--- ================= LOOPS =================
+-- ============================================================
+-- LOOPS
+-- ============================================================
 local loopsActive = true
 local connections = {}
 local function track(c) connections[#connections+1] = c; return c end
 
 task.spawn(function()
+    local lastWarn = 0
     while loopsActive do
         if state.autoTrain then
-            if not fireRemote("Train") then
-                pcall(function()
-                    local cam = workspace.CurrentCamera
-                    local center = cam and (cam.ViewportSize / 2) or Vector2.new(512, 512)
-                    VirtualUser:CaptureController()
-                    VirtualUser:ClickButton1(center)
-                end)
+            if not working.train then
+                working.train = findRemote("train")
+                if working.train then
+                    print("[GB] train remote: " .. working.train.name
+                        .. " (" .. working.train.class .. ")")
+                elseif os.clock() - lastWarn > 5 then
+                    warn("[GB] no train remote found. Check the discovery list above.")
+                    lastWarn = os.clock()
+                end
+            end
+            if working.train then
+                if not fireEntry(working.train) then
+                    warn("[GB] train remote fire failed — rescanning")
+                    working.train = nil
+                end
             end
             jitterWait()
             task.wait(state.undetectable and 0.15 or 0.05)
@@ -114,9 +188,23 @@ task.spawn(function()
 end)
 
 task.spawn(function()
+    local lastWarn = 0
     while loopsActive do
         if state.autoRebirth then
-            fireRemote("Rebirth")
+            if not working.rebirth then
+                working.rebirth = findRemote("rebirth")
+                if working.rebirth then
+                    print("[GB] rebirth remote: " .. working.rebirth.name)
+                elseif os.clock() - lastWarn > 5 then
+                    warn("[GB] no rebirth remote found.")
+                    lastWarn = os.clock()
+                end
+            end
+            if working.rebirth then
+                if not fireEntry(working.rebirth) then
+                    working.rebirth = nil
+                end
+            end
             jitterWait()
             task.wait(state.undetectable and 0.6 or 0.15)
         else
@@ -125,21 +213,22 @@ task.spawn(function()
     end
 end)
 
--- periodic re-scan (bug #2 companion)
+-- rescan remotes every 10s (game might load later)
 task.spawn(function()
     while loopsActive do
-        if not Remotes then
-            Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        task.wait(10)
+        if #allRemotes == 0 then
+            scanRemotes()
         end
-        refreshAttackRemotes()
-        task.wait(5)
+        refreshAttackList()
     end
 end)
 
--- ================= COMBAT =================
+-- ============================================================
+-- COMBAT
+-- ============================================================
 local lastAttack = 0
-local combatConn
-combatConn = RunService.RenderStepped:Connect(function()
+local combatConn = RunService.RenderStepped:Connect(function()
     if not (state.killAura or state.silentAim) then return end
     local target = closestEnemy()
     if not target then return end
@@ -153,16 +242,17 @@ combatConn = RunService.RenderStepped:Connect(function()
     end
 
     if state.killAura then
-        local now = os.clock()
-        if now - lastAttack < 0.1 then return end   -- 10Hz throttle (bug #3)
-        lastAttack = now
-        for _, remote in ipairs(attackRemotes) do
-            pcall(function() remote:FireServer(target.player) end)
+        if os.clock() - lastAttack < 0.1 then return end
+        lastAttack = os.clock()
+        for _, r in ipairs(working.attack) do
+            fireEntry(r, target.player)
         end
     end
 end)
 
--- ================= CONFIG =================
+-- ============================================================
+-- CONFIG
+-- ============================================================
 local function fileExists(name)
     if isfile then return isfile(name) end
     if readfile then return (pcall(readfile, name)) end
@@ -177,15 +267,16 @@ end
 local function loadConfig()
     if not readfile or not fileExists(CONFIG_FILE) then return end
     pcall(function()
-        local data = HttpService:JSONDecode(readfile(CONFIG_FILE))
-        for k, v in pairs(data) do
+        for k, v in pairs(HttpService:JSONDecode(readfile(CONFIG_FILE))) do
             if state[k] ~= nil then state[k] = v end
         end
     end)
 end
 loadConfig()
 
--- ================= UI =================
+-- ============================================================
+-- UI — responsive sizing (fixes covered buttons)
+-- ============================================================
 local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
 local old = parentGui:FindFirstChild("GloryBoundUI")
 if old then old:Destroy() end
@@ -198,6 +289,7 @@ ScreenGui.DisplayOrder = 999
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = parentGui
 
+-- palette
 local C = {
     bg      = Color3.fromRGB(15, 15, 19),
     panel   = Color3.fromRGB(22, 22, 28),
@@ -207,30 +299,43 @@ local C = {
     dim     = Color3.fromRGB(140, 140, 155),
     accent  = Color3.fromRGB(126, 96, 255),
     green   = Color3.fromRGB(78, 214, 128),
+    red     = Color3.fromRGB(220, 80, 100),
 }
 
-local function corner(p, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = p; return c end
+local function corner(p, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = p end
 local function stroke(p, col, t)
     local s = Instance.new("UIStroke"); s.Color = col or C.stroke; s.Thickness = t or 1
-    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = p; return s
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = p
 end
+
+-- responsive dimensions
+local cam = workspace.CurrentCamera
+local vs = (cam and cam.ViewportSize) or Vector2.new(1280, 720)
+local HEADER_H   = 44
+local STATUS_H   = 24
+local menuW      = math.min(520, vs.X - 24)
+local menuH      = math.min(380, vs.Y - 24)
+local sidebarW   = math.max(110, math.min(140, math.floor(menuW * 0.28)))
 
 -- === MAIN ===
 local Main = Instance.new("Frame")
-Main.Size = UDim2.new(0, 520, 0, 380)
-Main.Position = UDim2.new(0.5, -260, 0.5, -190)
+Main.Name = "Main"
+Main.Size = UDim2.new(0, menuW, 0, menuH)
+Main.Position = UDim2.new(0.5, 0, 0.5, 0)
+Main.AnchorPoint = Vector2.new(0.5, 0.5)
 Main.BackgroundColor3 = C.bg
 Main.BorderSizePixel = 0
 Main.Active = true
 Main.ClipsDescendants = true
 Main.Parent = ScreenGui
-corner(Main, 14); stroke(Main)
+corner(Main, 14); stroke(Main, C.stroke)
 
 -- === HEADER ===
 local Header = Instance.new("Frame")
-Header.Size = UDim2.new(1, 0, 0, 44)
+Header.Size = UDim2.new(1, 0, 0, HEADER_H)
 Header.BackgroundColor3 = C.panel
 Header.BorderSizePixel = 0
+Header.ZIndex = 5
 Header.Parent = Main
 
 local Dot = Instance.new("Frame")
@@ -242,7 +347,7 @@ Dot.Parent = Header
 corner(Dot, 99)
 
 local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(0, 180, 1, 0)
+Title.Size = UDim2.new(0, 150, 1, 0)
 Title.Position = UDim2.new(0, 32, 0, 0)
 Title.BackgroundTransparency = 1
 Title.Text = "GloryBound"
@@ -254,7 +359,7 @@ Title.Parent = Header
 
 local Ver = Instance.new("TextLabel")
 Ver.Size = UDim2.new(0, 60, 1, 0)
-Ver.Position = UDim2.new(0, 118, 0, 0)
+Ver.Position = UDim2.new(0, 132, 0, 0)
 Ver.BackgroundTransparency = 1
 Ver.Text = VERSION
 Ver.Font = Enum.Font.Gotham
@@ -263,26 +368,40 @@ Ver.TextColor3 = C.dim
 Ver.TextXAlignment = Enum.TextXAlignment.Left
 Ver.Parent = Header
 
--- debounced control (bug #1 fix)
-local function makeCtrl(xOff, text, cb)
+-- === HEADER BUTTONS (dedicated container, high ZIndex) ===
+local BTN = 30
+local GAP = 6
+local CONT_W = 4 + BTN + GAP + BTN + 4
+
+local BtnCont = Instance.new("Frame")
+BtnCont.Size = UDim2.new(0, CONT_W, 1, 0)
+BtnCont.Position = UDim2.new(1, -CONT_W, 0, 0)
+BtnCont.BackgroundTransparency = 1
+BtnCont.ZIndex = 10
+BtnCont.Parent = Header
+
+local function makeHeaderBtn(xOff, text, cb)
     local b = Instance.new("TextButton")
-    b.Size = UDim2.new(0, 26, 0, 26)
-    b.Position = UDim2.new(1, xOff, 0.5, -13)
+    b.Size = UDim2.new(0, BTN, 0, BTN)
+    b.Position = UDim2.new(0, xOff, 0.5, -BTN/2)
     b.BackgroundColor3 = C.panel2
     b.Text = text
     b.Font = Enum.Font.GothamBold
-    b.TextSize = 13
+    b.TextSize = 14
     b.TextColor3 = C.text
     b.AutoButtonColor = false
-    b.Parent = Header
+    b.ZIndex = 11
+    b.Active = true
+    b.Parent = BtnCont
     corner(b, 8)
     local busy = false
     local function fire()
         if busy then return end
         busy = true
         cb()
-        task.delay(0.1, function() busy = false end)
+        task.delay(0.12, function() busy = false end)
     end
+    b.Activated:Connect(fire)
     b.MouseButton1Click:Connect(fire)
     b.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.Touch then fire() end
@@ -290,15 +409,18 @@ local function makeCtrl(xOff, text, cb)
     return b
 end
 
-local isMinimized = false     -- bug #4 fix
-makeCtrl(-66, "—", function()
+-- minimize with explicit state
+local isMinimized = false
+makeHeaderBtn(4, "—", function()
     isMinimized = not isMinimized
     TweenService:Create(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quart), {
-        Size = isMinimized and UDim2.new(0, 520, 0, 44) or UDim2.new(0, 520, 0, 380)
+        Size = UDim2.new(0, menuW, 0, isMinimized and HEADER_H or menuH)
     }):Play()
 end)
 
-makeCtrl(-36, "×", function() ScreenGui:Destroy() end)
+makeHeaderBtn(4 + BTN + GAP, "×", function()
+    ScreenGui:Destroy()
+end)
 
 -- drag
 do
@@ -325,18 +447,18 @@ end
 
 -- === SIDEBAR ===
 local Sidebar = Instance.new("Frame")
-Sidebar.Size = UDim2.new(0, 130, 1, -44)
-Sidebar.Position = UDim2.new(0, 0, 0, 44)
+Sidebar.Size = UDim2.new(0, sidebarW, 1, -(HEADER_H + STATUS_H))
+Sidebar.Position = UDim2.new(0, 0, 0, HEADER_H)
 Sidebar.BackgroundColor3 = C.panel
 Sidebar.BorderSizePixel = 0
 Sidebar.Parent = Main
 
-local SBStroke = Instance.new("Frame")
-SBStroke.Size = UDim2.new(0, 1, 1, 0)
-SBStroke.Position = UDim2.new(1, -1, 0, 0)
-SBStroke.BackgroundColor3 = C.stroke
-SBStroke.BorderSizePixel = 0
-SBStroke.Parent = Sidebar
+local SideStroke = Instance.new("Frame")
+SideStroke.Size = UDim2.new(0, 1, 1, 0)
+SideStroke.Position = UDim2.new(1, -1, 0, 0)
+SideStroke.BackgroundColor3 = C.stroke
+SideStroke.BorderSizePixel = 0
+SideStroke.Parent = Sidebar
 
 local Tabs, TabPages = {}, {}
 
@@ -354,17 +476,18 @@ end
 
 local function makeTab(name, labelText, order)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -16, 0, 36)
-    btn.Position = UDim2.new(0, 8, 0, 8 + (order - 1) * 40)
+    btn.Size = UDim2.new(1, -12, 0, 34)
+    btn.Position = UDim2.new(0, 6, 0, 6 + (order - 1) * 38)
     btn.BackgroundColor3 = C.panel
     btn.Text = ""
     btn.AutoButtonColor = false
+    btn.Active = true
     btn.Parent = Sidebar
     corner(btn, 8)
 
     local stripe = Instance.new("Frame")
-    stripe.Size = UDim2.new(0, 3, 0, 18)
-    stripe.Position = UDim2.new(0, 0, 0.5, -9)
+    stripe.Size = UDim2.new(0, 3, 0, 16)
+    stripe.Position = UDim2.new(0, 0, 0.5, -8)
     stripe.BackgroundColor3 = C.accent
     stripe.BackgroundTransparency = 1
     stripe.BorderSizePixel = 0
@@ -372,8 +495,8 @@ local function makeTab(name, labelText, order)
     corner(stripe, 99)
 
     local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, -20, 1, 0)
-    label.Position = UDim2.new(0, 16, 0, 0)
+    label.Size = UDim2.new(1, -18, 1, 0)
+    label.Position = UDim2.new(0, 14, 0, 0)
     label.BackgroundTransparency = 1
     label.Text = labelText
     label.Font = Enum.Font.GothamMedium
@@ -391,6 +514,7 @@ local function makeTab(name, labelText, order)
         switchTab(name)
         task.delay(0.05, function() busy = false end)
     end
+    btn.Activated:Connect(fire)
     btn.MouseButton1Click:Connect(fire)
     btn.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.Touch then fire() end
@@ -399,14 +523,14 @@ end
 
 -- === CONTENT ===
 local Content = Instance.new("Frame")
-Content.Size = UDim2.new(1, -130, 1, -44)
-Content.Position = UDim2.new(0, 130, 0, 44)
+Content.Size = UDim2.new(1, -sidebarW, 1, -(HEADER_H + STATUS_H))
+Content.Position = UDim2.new(0, sidebarW, 0, HEADER_H)
 Content.BackgroundTransparency = 1
 Content.Parent = Main
 
 local function makePage(name)
     local p = Instance.new("ScrollingFrame")
-    p.Size = UDim2.new(1, 0, 1, -36)
+    p.Size = UDim2.new(1, 0, 1, 0)
     p.BackgroundTransparency = 1
     p.BorderSizePixel = 0
     p.ScrollBarThickness = 3
@@ -419,12 +543,12 @@ local function makePage(name)
     return p
 end
 
--- === ROW BUILDERS ===
-local updateStatus = function() end   -- forward declared
+-- forward declare
+local updateStatus = function() end
 
 local function makeSection(page, text, yPos)
     local l = Instance.new("TextLabel")
-    l.Size = UDim2.new(1, -24, 0, 18)
+    l.Size = UDim2.new(1, -24, 0, 16)
     l.Position = UDim2.new(0, 12, 0, yPos)
     l.BackgroundTransparency = 1
     l.Text = string.upper(text)
@@ -437,10 +561,11 @@ end
 
 local function makeToggleRow(page, labelText, key, yPos)
     local Row = Instance.new("Frame")
-    Row.Size = UDim2.new(1, -24, 0, 48)
+    Row.Size = UDim2.new(1, -24, 0, 46)
     Row.Position = UDim2.new(0, 12, 0, yPos)
     Row.BackgroundColor3 = C.panel
     Row.BorderSizePixel = 0
+    Row.Active = true
     Row.Parent = page
     corner(Row, 10); stroke(Row, C.stroke)
 
@@ -453,7 +578,7 @@ local function makeToggleRow(page, labelText, key, yPos)
     corner(dot, 99)
 
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -110, 1, 0)
+    lbl.Size = UDim2.new(1, -100, 1, 0)
     lbl.Position = UDim2.new(0, 28, 0, 0)
     lbl.BackgroundTransparency = 1
     lbl.Text = labelText
@@ -464,8 +589,8 @@ local function makeToggleRow(page, labelText, key, yPos)
     lbl.Parent = Row
 
     local Track = Instance.new("Frame")
-    Track.Size = UDim2.new(0, 42, 0, 22)
-    Track.Position = UDim2.new(1, -56, 0.5, -11)
+    Track.Size = UDim2.new(0, 40, 0, 22)
+    Track.Position = UDim2.new(1, -52, 0.5, -11)
     Track.BackgroundColor3 = C.panel2
     Track.BorderSizePixel = 0
     Track.Parent = Row
@@ -480,7 +605,7 @@ local function makeToggleRow(page, labelText, key, yPos)
     corner(Knob, 99)
 
     local debounce = false
-    local function apply(on, animate, skipSave)   -- bug #8 fix
+    local function apply(on, animate, skipSave)
         state[key] = on
         dot.BackgroundColor3 = on and C.green or C.dim
         local tw = TweenInfo.new(animate and 0.18 or 0, Enum.EasingStyle.Quart)
@@ -494,7 +619,7 @@ local function makeToggleRow(page, labelText, key, yPos)
         updateStatus()
     end
 
-    apply(state[key], false, true)   -- initial paint, no save
+    apply(state[key], false, true)
 
     Row.InputBegan:Connect(function(i)
         if debounce then return end
@@ -517,38 +642,52 @@ local CombatPage = makePage("Combat")
 local MiscPage   = makePage("Misc")
 
 makeSection(FarmPage, "Automation", 8)
-makeToggleRow(FarmPage, "Auto Train",   "autoTrain",   32)
-makeToggleRow(FarmPage, "Auto Rebirth", "autoRebirth", 88)
+makeToggleRow(FarmPage, "Auto Train",   "autoTrain",   30)
+makeToggleRow(FarmPage, "Auto Rebirth", "autoRebirth", 82)
 
 makeSection(CombatPage, "Targeting", 8)
-makeToggleRow(CombatPage, "Kill Aura",  "killAura",  32)
-makeToggleRow(CombatPage, "Silent Aim", "silentAim", 88)
+makeToggleRow(CombatPage, "Kill Aura",  "killAura",  30)
+makeToggleRow(CombatPage, "Silent Aim", "silentAim", 82)
 
 makeSection(MiscPage, "Behavior", 8)
-makeToggleRow(MiscPage, "Undetectable (jitter)", "undetectable", 32)
+makeToggleRow(MiscPage, "Undetectable (jitter)", "undetectable", 30)
+
+local hint = Instance.new("TextLabel")
+hint.Size = UDim2.new(1, -24, 0, 40)
+hint.Position = UDim2.new(0, 12, 0, 84)
+hint.BackgroundTransparency = 1
+hint.Text = "RightShift hides the menu.\nOpen the Delta console to see remote discovery."
+hint.Font = Enum.Font.Gotham
+hint.TextSize = 10
+hint.TextColor3 = C.dim
+hint.TextWrapped = true
+hint.TextXAlignment = Enum.TextXAlignment.Left
+hint.TextYAlignment = Enum.TextYAlignment.Top
+hint.Parent = MiscPage
 
 -- === STATUS BAR ===
 local StatusBar = Instance.new("Frame")
-StatusBar.Size = UDim2.new(1, -130, 0, 24)
-StatusBar.Position = UDim2.new(0, 130, 1, -24)
+StatusBar.Size = UDim2.new(1, -sidebarW, 0, STATUS_H)
+StatusBar.Position = UDim2.new(0, sidebarW, 1, -STATUS_H)
 StatusBar.BackgroundColor3 = C.panel
 StatusBar.BorderSizePixel = 0
 StatusBar.Parent = Main
 
 local StatusLeft = Instance.new("TextLabel")
-StatusLeft.Size = UDim2.new(0, 220, 1, 0)
-StatusLeft.Position = UDim2.new(0, 12, 0, 0)
+StatusLeft.Size = UDim2.new(0, math.floor(menuW * 0.55), 1, 0)
+StatusLeft.Position = UDim2.new(0, 10, 0, 0)
 StatusLeft.BackgroundTransparency = 1
 StatusLeft.Text = "Ready"
 StatusLeft.Font = Enum.Font.Gotham
 StatusLeft.TextSize = 10
 StatusLeft.TextColor3 = C.dim
 StatusLeft.TextXAlignment = Enum.TextXAlignment.Left
+StatusLeft.TextTruncate = Enum.TextTruncate.AtEnd
 StatusLeft.Parent = StatusBar
 
 local StatusRight = Instance.new("TextLabel")
-StatusRight.Size = UDim2.new(0, 160, 1, 0)
-StatusRight.Position = UDim2.new(1, -172, 0, 0)
+StatusRight.Size = UDim2.new(0, 150, 1, 0)
+StatusRight.Position = UDim2.new(1, -160, 0, 0)
 StatusRight.BackgroundTransparency = 1
 StatusRight.Text = "0 FPS · -- ms"
 StatusRight.Font = Enum.Font.Gotham
@@ -557,17 +696,16 @@ StatusRight.TextColor3 = C.dim
 StatusRight.TextXAlignment = Enum.TextXAlignment.Right
 StatusRight.Parent = StatusBar
 
--- bug #11: live status reflects active features
 updateStatus = function()
     local active = {}
     for k, v in pairs(state) do
         if v and k ~= "undetectable" then active[#active+1] = k end
     end
-    StatusLeft.Text = #active == 0 and "Ready" or ("Active: " .. table.concat(active, ", "))
+    StatusLeft.Text = #active == 0 and "Ready"
+        or ("Active: " .. table.concat(active, ", "))
 end
 updateStatus()
 
--- FPS + ping (bug #6: os.clock)
 task.spawn(function()
     local last, frames = os.clock(), 0
     local ping = 0
@@ -582,14 +720,13 @@ task.spawn(function()
         frames = frames + 1
         if os.clock() - last >= 1 then
             local fps = math.floor(frames / (os.clock() - last))
-            StatusRight.Text = string.format("%d FPS · %d ms", fps, math.floor(ping))
+            StatusRight.Text = ("%d FPS · %d ms"):format(fps, math.floor(ping))
             frames, last = 0, os.clock()
         end
         task.wait(0.1)
     end
 end)
 
--- keybind
 track(UserInputService.InputBegan:Connect(function(i, gp)
     if gp then return end
     if i.KeyCode == Enum.KeyCode.RightShift then
@@ -599,7 +736,6 @@ end))
 
 switchTab("Farm")
 
--- === CLEANUP ===
 ScreenGui.Destroying:Connect(function()
     loopsActive = false
     if combatConn then combatConn:Disconnect() end
