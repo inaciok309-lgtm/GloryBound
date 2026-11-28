@@ -1,6 +1,7 @@
 --[[
-    GloryBound — v5
-    Responsive UI + working remote discovery
+    GloryBound — v6 (completo)
+    Auto Train, Auto Rebirth, Kill Aura, Silent Aim
+    UI responsiva + remotes reais do jogo
 ]]
 
 local Players           = game:GetService("Players")
@@ -8,14 +9,13 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService        = game:GetService("RunService")
 local TweenService      = game:GetService("TweenService")
 local UserInputService  = game:GetService("UserInputService")
-local VirtualUser       = game:GetService("VirtualUser")
 local HttpService       = game:GetService("HttpService")
 
 repeat task.wait() until Players.LocalPlayer
 local LocalPlayer = Players.LocalPlayer
 
 local CONFIG_FILE = "GloryBound_config.json"
-local VERSION     = "v5.0"
+local VERSION     = "v6.0"
 
 local state = {
     autoTrain    = false,
@@ -26,96 +26,94 @@ local state = {
 }
 
 -- ============================================================
--- REMOTE DISCOVERY
+-- DESCOBERTA DE REMOTES
 -- ============================================================
-local allRemotes = {}
-local working = {train = nil, rebirth = nil, attack = {}}
-
-local function scanRemotes()
-    allRemotes = {}
-    local folder = ReplicatedStorage:FindFirstChild("Remotes")
-    local containers = folder and {folder} or {ReplicatedStorage}
-    for _, container in ipairs(containers) do
-        for _, obj in ipairs(container:GetDescendants()) do
-            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-                allRemotes[#allRemotes+1] = {
-                    name = obj.Name,
-                    remote = obj,
-                    class = obj.ClassName,
-                }
-            end
-        end
-    end
-    print(("[GB] === Remotes discovered: %d ==="):format(#allRemotes))
-    for i, r in ipairs(allRemotes) do
-        if i > 150 then print("[GB] ... (truncated)"); break end
-        print(("  [%s] %s"):format(r.class, r.name))
-    end
-end
-task.spawn(scanRemotes)
-
-local CANDIDATES = {
-    train   = {"Train","train","AutoTrain","StartTrain","Training","DoTrain",
-               "TrainUp","AddTrain","Farm","farm","Grind"},
-    rebirth = {"Rebirth","rebirth","AutoRebirth","DoRebirth","Reborn",
-               "Prestige","Reincarnate","Reset"},
-    attack  = {"Attack","attack","Hit","hit","Damage","damage","Strike",
-               "strike","Punch","Kill","kill","Skill","Shoot","Fire","Combat"},
+local remotes = {
+    train   = nil,
+    rebirth = nil,
+    attack  = nil,
 }
 
-local function findRemote(kind)
-    -- 1. exact match on candidate names
-    for _, cand in ipairs(CANDIDATES[kind]) do
-        for _, r in ipairs(allRemotes) do
-            if r.name == cand then return r end
-        end
-    end
-    -- 2. substring match
-    for _, cand in ipairs(CANDIDATES[kind]) do
-        local cl = cand:lower()
-        for _, r in ipairs(allRemotes) do
-            if r.name:lower():find(cl, 1, true) then return r end
-        end
-    end
-    return nil
-end
-
-local function fireEntry(entry, ...)
-    if not entry then return false end
-    local args = table.pack(...)
-    if entry.class == "RemoteEvent" then
-        return (pcall(function()
-            entry.remote:FireServer(table.unpack(args, 1, args.n))
-        end))
-    else
-        task.spawn(function()
-            pcall(function()
-                entry.remote:InvokeServer(table.unpack(args, 1, args.n))
-            end)
-        end)
-        return true
+local function tryFindTrain()
+    local re = ReplicatedStorage:FindFirstChild("RemoteEvents")
+    if not re then return end
+    remotes.train = re:FindFirstChild("TrainStatsRemote")
+    if remotes.train then
+        print("[GB] Train remote: RemoteEvents.TrainStatsRemote")
     end
 end
 
-local function refreshAttackList()
-    working.attack = {}
-    for _, r in ipairs(allRemotes) do
-        if r.class == "RemoteEvent" then
-            local lower = r.name:lower()
-            for _, cand in ipairs(CANDIDATES.attack) do
-                if lower:find(cand:lower(), 1, true) then
-                    working.attack[#working.attack+1] = r
-                    break
-                end
+local function tryFindRebirth()
+    local re = ReplicatedStorage:FindFirstChild("RemoteEvents")
+    if not re then return end
+    for _, name in ipairs({"RebirthRemote", "Rebirth", "RebirthEvent", "DoRebirth", "Prestige"}) do
+        local r = re:FindFirstChild(name)
+        if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then
+            remotes.rebirth = r
+            print("[GB] Rebirth remote: RemoteEvents." .. name)
+            return
+        end
+    end
+end
+
+local function tryFindAttack()
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    if not systems then return end
+    local actions = systems:FindFirstChild("ActionsSystem")
+    if not actions then return end
+    local network = actions:FindFirstChild("Network")
+    if not network then return end
+    local attack = network:FindFirstChild("Attack")
+    if attack and (attack:IsA("RemoteEvent") or attack:IsA("RemoteFunction")) then
+        remotes.attack = attack
+        print("[GB] Attack remote: Systems.ActionsSystem.Network.Attack")
+    end
+end
+
+task.spawn(function()
+    ReplicatedStorage:WaitForChild("RemoteEvents", 20)
+    ReplicatedStorage:WaitForChild("Systems", 20)
+    tryFindTrain()
+    tryFindRebirth()
+    tryFindAttack()
+
+    -- varredura de debug
+    local re = ReplicatedStorage:FindFirstChild("RemoteEvents")
+    if re then
+        print("[GB] === RemoteEvents disponíveis ===")
+        for _, v in ipairs(re:GetChildren()) do
+            if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
+                print("  [" .. v.ClassName .. "] " .. v.Name)
             end
         end
     end
-    if #working.attack > 0 then
-        print(("[GB] attack remotes: %d"):format(#working.attack))
-        for _, r in ipairs(working.attack) do print("  -> " .. r.name) end
+end)
+
+-- rescan a cada 15s caso o jogo carregue tarde
+task.spawn(function()
+    while true do
+        task.wait(15)
+        if not remotes.train   then tryFindTrain()   end
+        if not remotes.rebirth then tryFindRebirth() end
+        if not remotes.attack  then tryFindAttack()  end
     end
+end)
+
+-- ============================================================
+-- DISPARO SEGURO
+-- ============================================================
+local function fireRemote(remote, ...)
+    if not remote then return false end
+    local args = table.pack(...)
+    local ok = pcall(function()
+        if remote:IsA("RemoteEvent") then
+            remote:FireServer(table.unpack(args, 1, args.n))
+        elseif remote:IsA("RemoteFunction") then
+            remote:InvokeServer(table.unpack(args, 1, args.n))
+        end
+    end)
+    return ok
 end
-task.spawn(refreshAttackList)
 
 -- ============================================================
 -- HELPERS
@@ -159,27 +157,17 @@ local loopsActive = true
 local connections = {}
 local function track(c) connections[#connections+1] = c; return c end
 
+-- Auto Train
 task.spawn(function()
-    local lastWarn = 0
     while loopsActive do
         if state.autoTrain then
-            if not working.train then
-                working.train = findRemote("train")
-                if working.train then
-                    print("[GB] train remote: " .. working.train.name
-                        .. " (" .. working.train.class .. ")")
-                elseif os.clock() - lastWarn > 5 then
-                    warn("[GB] no train remote found. Check the discovery list above.")
-                    lastWarn = os.clock()
-                end
+            if not remotes.train then tryFindTrain() end
+            if remotes.train then
+                fireRemote(remotes.train, "Strength")
+                jitterWait()
+                fireRemote(remotes.train, "Power")
+                jitterWait()
             end
-            if working.train then
-                if not fireEntry(working.train) then
-                    warn("[GB] train remote fire failed — rescanning")
-                    working.train = nil
-                end
-            end
-            jitterWait()
             task.wait(state.undetectable and 0.15 or 0.05)
         else
             task.wait(0.2)
@@ -187,23 +175,13 @@ task.spawn(function()
     end
 end)
 
+-- Auto Rebirth
 task.spawn(function()
-    local lastWarn = 0
     while loopsActive do
         if state.autoRebirth then
-            if not working.rebirth then
-                working.rebirth = findRemote("rebirth")
-                if working.rebirth then
-                    print("[GB] rebirth remote: " .. working.rebirth.name)
-                elseif os.clock() - lastWarn > 5 then
-                    warn("[GB] no rebirth remote found.")
-                    lastWarn = os.clock()
-                end
-            end
-            if working.rebirth then
-                if not fireEntry(working.rebirth) then
-                    working.rebirth = nil
-                end
+            if not remotes.rebirth then tryFindRebirth() end
+            if remotes.rebirth then
+                fireRemote(remotes.rebirth)
             end
             jitterWait()
             task.wait(state.undetectable and 0.6 or 0.15)
@@ -213,20 +191,7 @@ task.spawn(function()
     end
 end)
 
--- rescan remotes every 10s (game might load later)
-task.spawn(function()
-    while loopsActive do
-        task.wait(10)
-        if #allRemotes == 0 then
-            scanRemotes()
-        end
-        refreshAttackList()
-    end
-end)
-
--- ============================================================
--- COMBAT
--- ============================================================
+-- Kill Aura + Silent Aim
 local lastAttack = 0
 local combatConn = RunService.RenderStepped:Connect(function()
     if not (state.killAura or state.silentAim) then return end
@@ -244,11 +209,13 @@ local combatConn = RunService.RenderStepped:Connect(function()
     if state.killAura then
         if os.clock() - lastAttack < 0.1 then return end
         lastAttack = os.clock()
-        for _, r in ipairs(working.attack) do
-            fireEntry(r, target.player)
+        if not remotes.attack then tryFindAttack() end
+        if remotes.attack and target.player.Character then
+            fireRemote(remotes.attack, target.player.Character)
         end
     end
 end)
+track(combatConn)
 
 -- ============================================================
 -- CONFIG
@@ -275,7 +242,7 @@ end
 loadConfig()
 
 -- ============================================================
--- UI — responsive sizing (fixes covered buttons)
+-- UI
 -- ============================================================
 local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
 local old = parentGui:FindFirstChild("GloryBoundUI")
@@ -289,17 +256,15 @@ ScreenGui.DisplayOrder = 999
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = parentGui
 
--- palette
 local C = {
-    bg      = Color3.fromRGB(15, 15, 19),
-    panel   = Color3.fromRGB(22, 22, 28),
-    panel2  = Color3.fromRGB(28, 28, 36),
-    stroke  = Color3.fromRGB(44, 44, 56),
-    text    = Color3.fromRGB(235, 235, 242),
-    dim     = Color3.fromRGB(140, 140, 155),
-    accent  = Color3.fromRGB(126, 96, 255),
-    green   = Color3.fromRGB(78, 214, 128),
-    red     = Color3.fromRGB(220, 80, 100),
+    bg     = Color3.fromRGB(15, 15, 19),
+    panel  = Color3.fromRGB(22, 22, 28),
+    panel2 = Color3.fromRGB(28, 28, 36),
+    stroke = Color3.fromRGB(44, 44, 56),
+    text   = Color3.fromRGB(235, 235, 242),
+    dim    = Color3.fromRGB(140, 140, 155),
+    accent = Color3.fromRGB(126, 96, 255),
+    green  = Color3.fromRGB(78, 214, 128),
 }
 
 local function corner(p, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = p end
@@ -308,18 +273,16 @@ local function stroke(p, col, t)
     s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = p
 end
 
--- responsive dimensions
 local cam = workspace.CurrentCamera
 local vs = (cam and cam.ViewportSize) or Vector2.new(1280, 720)
-local HEADER_H   = 44
-local STATUS_H   = 24
-local menuW      = math.min(520, vs.X - 24)
-local menuH      = math.min(380, vs.Y - 24)
-local sidebarW   = math.max(110, math.min(140, math.floor(menuW * 0.28)))
+local HEADER_H = 44
+local STATUS_H = 24
+local menuW    = math.min(520, vs.X - 24)
+local menuH    = math.min(380, vs.Y - 24)
+local sidebarW = math.max(100, math.min(130, math.floor(menuW * 0.27)))
 
--- === MAIN ===
+-- MAIN
 local Main = Instance.new("Frame")
-Main.Name = "Main"
 Main.Size = UDim2.new(0, menuW, 0, menuH)
 Main.Position = UDim2.new(0.5, 0, 0.5, 0)
 Main.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -330,7 +293,7 @@ Main.ClipsDescendants = true
 Main.Parent = ScreenGui
 corner(Main, 14); stroke(Main, C.stroke)
 
--- === HEADER ===
+-- HEADER
 local Header = Instance.new("Frame")
 Header.Size = UDim2.new(1, 0, 0, HEADER_H)
 Header.BackgroundColor3 = C.panel
@@ -368,7 +331,7 @@ Ver.TextColor3 = C.dim
 Ver.TextXAlignment = Enum.TextXAlignment.Left
 Ver.Parent = Header
 
--- === HEADER BUTTONS (dedicated container, high ZIndex) ===
+-- BOTÕES HEADER
 local BTN = 30
 local GAP = 6
 local CONT_W = 4 + BTN + GAP + BTN + 4
@@ -406,10 +369,8 @@ local function makeHeaderBtn(xOff, text, cb)
     b.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.Touch then fire() end
     end)
-    return b
 end
 
--- minimize with explicit state
 local isMinimized = false
 makeHeaderBtn(4, "—", function()
     isMinimized = not isMinimized
@@ -422,7 +383,7 @@ makeHeaderBtn(4 + BTN + GAP, "×", function()
     ScreenGui:Destroy()
 end)
 
--- drag
+-- DRAG
 do
     local dragging, dragStart, startPos
     Header.InputBegan:Connect(function(i)
@@ -445,7 +406,7 @@ do
     end))
 end
 
--- === SIDEBAR ===
+-- SIDEBAR
 local Sidebar = Instance.new("Frame")
 Sidebar.Size = UDim2.new(0, sidebarW, 1, -(HEADER_H + STATUS_H))
 Sidebar.Position = UDim2.new(0, 0, 0, HEADER_H)
@@ -521,7 +482,7 @@ local function makeTab(name, labelText, order)
     end)
 end
 
--- === CONTENT ===
+-- CONTENT
 local Content = Instance.new("Frame")
 Content.Size = UDim2.new(1, -sidebarW, 1, -(HEADER_H + STATUS_H))
 Content.Position = UDim2.new(0, sidebarW, 0, HEADER_H)
@@ -543,7 +504,6 @@ local function makePage(name)
     return p
 end
 
--- forward declare
 local updateStatus = function() end
 
 local function makeSection(page, text, yPos)
@@ -632,7 +592,7 @@ local function makeToggleRow(page, labelText, key, yPos)
     end)
 end
 
--- === BUILD ===
+-- BUILD
 makeTab("Farm",   "Farm",   1)
 makeTab("Combat", "Combat", 2)
 makeTab("Misc",   "Misc",   3)
@@ -653,10 +613,10 @@ makeSection(MiscPage, "Behavior", 8)
 makeToggleRow(MiscPage, "Undetectable (jitter)", "undetectable", 30)
 
 local hint = Instance.new("TextLabel")
-hint.Size = UDim2.new(1, -24, 0, 40)
+hint.Size = UDim2.new(1, -24, 0, 60)
 hint.Position = UDim2.new(0, 12, 0, 84)
 hint.BackgroundTransparency = 1
-hint.Text = "RightShift hides the menu.\nOpen the Delta console to see remote discovery."
+hint.Text = "RightShift esconde o menu.\nAbra o console do Delta para ver a descoberta de remotes."
 hint.Font = Enum.Font.Gotham
 hint.TextSize = 10
 hint.TextColor3 = C.dim
@@ -665,7 +625,7 @@ hint.TextXAlignment = Enum.TextXAlignment.Left
 hint.TextYAlignment = Enum.TextYAlignment.Top
 hint.Parent = MiscPage
 
--- === STATUS BAR ===
+-- STATUS BAR
 local StatusBar = Instance.new("Frame")
 StatusBar.Size = UDim2.new(1, -sidebarW, 0, STATUS_H)
 StatusBar.Position = UDim2.new(0, sidebarW, 1, -STATUS_H)
